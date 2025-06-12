@@ -111,7 +111,7 @@ with st.sidebar:
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Main content area
-st.markdown('<h1 class="main-header">💰 SplitWise Clone</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">💰 SplitWiser</h1>', unsafe_allow_html=True)
 
 # Check if user is logged in
 if not st.session_state.current_user:
