@@ -10,3 +10,6 @@ etc/
 
 # cache
 __pycache__/
+
+# vscode
+.vscode/
