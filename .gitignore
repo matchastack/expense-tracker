@@ -6,3 +6,7 @@ pyvenv.cfg
 
 # jupyter
 share/
+etc/
+
+# cache
+__pycache__/
