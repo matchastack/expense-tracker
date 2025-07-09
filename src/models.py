@@ -33,7 +33,9 @@ class DatabaseManager:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, params or ())
-                return cursor.fetchone()
+                result = cursor.fetchone()
+                conn.commit()
+                return result
         finally:
             conn.close()
 
