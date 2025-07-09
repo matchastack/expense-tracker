@@ -16,3 +16,6 @@ __pycache__/
 
 # streamlit
 .streamlit/
+
+# secrets
+.env
