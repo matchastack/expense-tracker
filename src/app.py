@@ -33,6 +33,11 @@ def init_database():
         'settlements': SettlementModel(db_manager)
     }
 
+# Add a button to clear cache in development mode
+if st.sidebar.button("🔄 Clear Cache (Dev)", help="Clear all cached resources"):
+    st.cache_resource.clear()
+    st.rerun()
+
 models = init_database()
 
 if 'current_user' not in st.session_state:
