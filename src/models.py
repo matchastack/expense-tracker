@@ -44,13 +44,34 @@ class UserModel:
         self.db = db_manager
     
     def create(self, name: str, email: str = None, phone: str = None) -> Dict:
-        query = """
-            INSERT INTO users (name, email, phone)
-            VALUES (%s, %s, %s)
-            RETURNING *
-        """
-        result = self.db.execute_one(query, (name, email, phone))
-        return result
+        # Validate input
+        if not name or not name.strip():
+            raise ValueError("User name cannot be empty")
+        
+        name = name.strip()
+        email = email.strip() if email else None
+        phone = phone.strip() if phone else None
+        
+        # Check for duplicate email if provided
+        if email:
+            existing_email = self.get_by_email(email)
+            if existing_email:
+                raise ValueError(f"User with email '{email}' already exists")
+        
+        try:
+            query = """
+                INSERT INTO users (name, email, phone)
+                VALUES (%s, %s, %s)
+                RETURNING *
+            """
+            result = self.db.execute_one(query, (name, email, phone))
+            return result
+        except psycopg2.IntegrityError as e:
+            if "users_email_key" in str(e):
+                raise ValueError(f"Email '{email}' is already in use")
+            raise ValueError(f"Database constraint violation: {str(e)}")
+        except Exception as e:
+            raise ValueError(f"Failed to create user: {str(e)}")
     
     def get_by_id(self, user_id: str) -> Optional[Dict]:
         query = "SELECT * FROM users WHERE id = %s AND is_active = TRUE"
@@ -58,11 +79,69 @@ class UserModel:
     
     def get_by_name(self, name: str) -> Optional[Dict]:
         query = "SELECT * FROM users WHERE LOWER(name) = LOWER(%s) AND is_active = TRUE"
-        return self.db.execute_one(query, (name,))
+        return self.db.execute_one(query, (name.strip(),))
+    
+    def get_by_email(self, email: str) -> Optional[Dict]:
+        query = "SELECT * FROM users WHERE LOWER(email) = LOWER(%s) AND is_active = TRUE"
+        return self.db.execute_one(query, (email.strip(),))
     
     def get_all(self) -> List[Dict]:
         query = "SELECT * FROM users WHERE is_active = TRUE ORDER BY name"
         return self.db.execute_query(query, fetch=True)
+    
+    def update(self, user_id: str, name: str = None, email: str = None, phone: str = None) -> Optional[Dict]:
+        # Build dynamic update query
+        updates = []
+        params = []
+        
+        if name and name.strip():
+            updates.append("name = %s")
+            params.append(name.strip())
+        
+        if email is not None:
+            if email.strip():
+                # Check for duplicate email
+                existing = self.get_by_email(email.strip())
+                if existing and existing['id'] != user_id:
+                    raise ValueError(f"Email '{email}' is already in use")
+                updates.append("email = %s")
+                params.append(email.strip())
+            else:
+                updates.append("email = NULL")
+        
+        if phone is not None:
+            if phone.strip():
+                updates.append("phone = %s")
+                params.append(phone.strip())
+            else:
+                updates.append("phone = NULL")
+        
+        if not updates:
+            return self.get_by_id(user_id)
+        
+        params.append(user_id)
+        query = f"""
+            UPDATE users 
+            SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND is_active = TRUE
+            RETURNING *
+        """
+        
+        try:
+            return self.db.execute_one(query, params)
+        except psycopg2.IntegrityError as e:
+            if "users_email_key" in str(e):
+                raise ValueError(f"Email is already in use")
+            raise ValueError(f"Database constraint violation: {str(e)}")
+    
+    def deactivate(self, user_id: str) -> bool:
+        query = """
+            UPDATE users 
+            SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND is_active = TRUE
+        """
+        rows = self.db.execute_query(query, (user_id,))
+        return rows > 0
 
 class GroupModel:
     def __init__(self, db_manager: DatabaseManager):
