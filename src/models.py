@@ -142,21 +142,29 @@ class ExpenseModel:
             conn.close()
     
     def get_user_expenses(self, user_id: str) -> List[Dict]:
+        # First get the expenses
         query = """
-            SELECT DISTINCT e.*, 
-                   array_agg(json_build_object(
-                       'user_id', es.user_id, 
-                       'amount', es.amount,
-                       'percentage', es.percentage
-                   )) as splits
+            SELECT DISTINCT e.*
             FROM expenses e
             LEFT JOIN expense_splits es ON e.id = es.expense_id
             WHERE (e.paid_by = %s OR es.user_id = %s) 
                 AND e.is_deleted = FALSE
-            GROUP BY e.id
             ORDER BY e.created_at DESC
         """
-        return self.db.execute_query(query, (user_id, user_id), fetch=True)
+        expenses = self.db.execute_query(query, (user_id, user_id), fetch=True)
+        
+        # Then get splits for each expense
+        for expense in expenses:
+            splits_query = """
+                SELECT user_id, amount, percentage
+                FROM expense_splits
+                WHERE expense_id = %s
+                ORDER BY user_id
+            """
+            splits = self.db.execute_query(splits_query, (expense['id'],), fetch=True)
+            expense['splits'] = splits
+        
+        return expenses
     
     def get_group_expenses(self, group_id: str) -> List[Dict]:
         query = """
