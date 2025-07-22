@@ -20,3 +20,4 @@ __pycache__/
 # secrets
 .env
 credentials.json
+token.json
