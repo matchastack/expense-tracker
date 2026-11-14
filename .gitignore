@@ -1,21 +1,19 @@
-# venv
-bin/
-include/
-lib/
-pyvenv.cfg
+# dependencies
+node_modules/
 
-# jupyter
-share/
-etc/
+# next.js
+.next/
+out/
+next-env.d.ts
 
-# cache
-__pycache__/
-
-# vscode
-.vscode/
-
-# streamlit
-.streamlit/
-
-# secrets
+# env / secrets
 .env
+.env.*
+!.env.example
+
+# misc
+.DS_Store
+*.tsbuildinfo
+coverage/
+.vercel
+.vscode/
