@@ -710,36 +710,43 @@ export function ImportSheet() {
     setProgress([]);
     try {
       const found = (await call({ step: 'discover', token: secret })) as {
-        databases: Array<{ key: string; id: string; label: string; props: string[] }>;
+        sources: Array<{ key: string; id: string; label: string; props: string[] }>;
         currency: string | null;
       };
-      const list: Progress[] = found.databases.map((db) => ({ key: db.key, label: db.label, count: 0, done: false }));
+      const list: Progress[] = found.sources.map((db) => ({ key: db.key, label: db.label, count: 0, done: false }));
       setProgress(list);
       const seen: Record<string, string[]> = { expenses: [], incomes: [] };
-      for (const [i, db] of found.databases.entries()) {
+      const partial: string[] = [];
+      for (const [i, db] of found.sources.entries()) {
         setMessage(`Importing ${db.label.toLowerCase()}…`);
         let cursor: string | null = null;
         do {
-          const res = (await call({ step: 'page', token: secret, key: db.key, databaseId: db.id, cursor, props: db.props })) as {
+          const res = (await call({ step: 'page', token: secret, key: db.key, sourceId: db.id, cursor, props: db.props })) as {
             next: string | null;
             count: number;
             ids: string[];
+            incomplete: boolean;
           };
           list[i] = { ...list[i], count: list[i].count + res.count };
           if (db.key in seen) seen[db.key].push(...res.ids);
+          if (res.incomplete && !partial.includes(db.label)) partial.push(db.label);
           cursor = res.next;
           setProgress([...list]);
         } while (cursor);
         list[i] = { ...list[i], done: true };
         setProgress([...list]);
       }
+      // A partial listing says nothing about what was deleted in Notion, so skip the clean-up for it.
+      for (const db of found.sources) if (partial.includes(db.label)) delete seen[db.key];
       const fin = (await call({ step: 'finish', seen, currency: found.currency })) as { removed: number };
       setMessage('Downloading to this device…');
       await sync();
       setMessage(
-        fin.removed
-          ? `Done. ${fin.removed} row(s) that are no longer in Notion were removed.`
-          : 'Done. Everything from Notion is here.',
+        partial.length
+          ? `Imported, but Notion did not return every row for: ${partial.join(', ')}. Check that the integration can read content, then import again.`
+          : fin.removed
+            ? `Done. ${fin.removed} row(s) that are no longer in Notion were removed.`
+            : 'Done. Everything from Notion is here.',
       );
       setPhase('done');
       setToken('');

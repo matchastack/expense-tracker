@@ -4,13 +4,16 @@
  *
  * Notion page ids are kept as row ids, so importing again updates rows in
  * place instead of duplicating them.
+ *
+ * Uses the "data source" endpoints (API version 2025-09-03): a Notion database
+ * holds one or more data sources, and rows are queried per data source.
  */
 import { SETTING, type Op, type TableName } from '../schema';
 import { withTransaction } from './db';
 import { HttpError } from './http';
 import { applyOps } from './sync';
 
-const NOTION_VERSION = '2022-06-28';
+const NOTION_VERSION = '2025-09-03';
 const apiBase = () => process.env.NOTION_API_BASE || 'https://api.notion.com';
 
 export type SourceKey =
@@ -26,7 +29,7 @@ export type SourceKey =
 
 interface Source {
   key: SourceKey;
-  /** Database title in Notion. */
+  /** Title of the database (data source) in Notion. */
   title: string;
   label: string;
   required: boolean;
@@ -132,30 +135,34 @@ const CURRENCY: Record<string, string> = {
 };
 
 export interface Discovery {
-  /** `props` are the Notion property ids of the columns to fetch. */
-  databases: Array<{ key: SourceKey; id: string; label: string; props: string[] }>;
+  /** `id` is the Notion data source id; `props` are the property ids of the columns to fetch. */
+  sources: Array<{ key: SourceKey; id: string; label: string; props: string[] }>;
   currency: string | null;
 }
 
 /** Find the databases this integration can see and match them to the tables we need. */
 export async function discover(token: string): Promise<Discovery> {
   const found = new Map<string, Json[]>();
+  const seen = new Set<string>();
   let cursor: string | undefined;
   do {
     const page = await notion(token, '/v1/search', {
-      filter: { property: 'object', value: 'database' },
+      filter: { property: 'object', value: 'data_source' },
       page_size: 100,
       ...(cursor ? { start_cursor: cursor } : {}),
     });
     for (const db of page.results ?? []) {
-      if (db.archived || db.in_trash) continue;
+      // Skip pages, trashed databases, and ones the integration can only partly see (no title).
+      if (db?.object !== 'data_source' || db.archived || db.in_trash || !Array.isArray(db.title)) continue;
+      if (seen.has(db.id)) continue;
+      seen.add(db.id);
       const title = plain(db.title).toLowerCase();
       found.set(title, [...(found.get(title) ?? []), db]);
     }
     cursor = page.has_more ? page.next_cursor : undefined;
   } while (cursor);
 
-  const databases: Discovery['databases'] = [];
+  const sources: Discovery['sources'] = [];
   const missing: string[] = [];
   let currency: string | null = null;
   for (const source of SOURCES) {
@@ -176,7 +183,7 @@ export async function discover(token: string): Promise<Discovery> {
       .filter(([name, p]) => p?.type === 'title' || wanted.has(norm(name)))
       .map(([, p]) => p?.id)
       .filter((id): id is string => typeof id === 'string' && id.length > 0);
-    databases.push({ key: source.key, id: matches[0].id, label: source.label, props });
+    sources.push({ key: source.key, id: matches[0].id, label: source.label, props });
     if (source.key === 'expenses') {
       const amount = schema.find(([name]) => norm(name) === 'amount')?.[1];
       currency = CURRENCY[amount?.number?.format] ?? null;
@@ -188,7 +195,7 @@ export async function discover(token: string): Promise<Discovery> {
       `Could not find: ${missing.join(', ')}. In Notion, open the "My Finance" page → ••• → Connections, add your integration, then try again.`,
     );
   }
-  return { databases, currency };
+  return { sources, currency };
 }
 
 /* ---------- Mapping Notion pages to rows ---------- */
@@ -404,24 +411,26 @@ export interface PageResult {
   next: string | null;
   count: number;
   ids: string[];
+  /** Notion did not return every row in full. Rows missing from this listing must not be treated as deleted. */
+  incomplete: boolean;
 }
 
-/** Read one page (up to 100 rows) of a Notion database and upsert it. */
+/** Read one page (up to 100 rows) of a Notion data source and upsert it. */
 export async function importPage(
   token: string,
   key: unknown,
-  databaseId: unknown,
+  sourceId: unknown,
   cursor: unknown,
   props: unknown = [],
 ): Promise<PageResult> {
   if (!isSourceKey(key)) throw new HttpError(400, 'Unknown import source.');
-  if (typeof databaseId !== 'string' || !/^[0-9a-f-]{32,36}$/i.test(databaseId)) {
+  if (typeof sourceId !== 'string' || !/^[0-9a-f-]{32,36}$/i.test(sourceId)) {
     throw new HttpError(400, 'Bad database id.');
   }
   const ids = Array.isArray(props)
     ? props.filter((p): p is string => typeof p === 'string' && p.length > 0 && p.length <= 64).slice(0, 30)
     : [];
-  const path = `/v1/databases/${databaseId}/query`;
+  const path = `/v1/data_sources/${sourceId}/query`;
   const body = {
     page_size: 100,
     ...(typeof cursor === 'string' && cursor ? { start_cursor: cursor } : {}),
@@ -440,13 +449,22 @@ export async function importPage(
   if (ids.length && first && Object.keys(first.properties ?? {}).length < ids.length) {
     page = await notion(token, path, body);
   }
-  const rows = ((page.results ?? []) as Json[])
+  const pages = ((page.results ?? []) as Json[]).filter((r) => r?.object === 'page');
+  // Without content access Notion returns bare { id } pages. Importing those would blank the row.
+  const full = pages.filter((r) => r.properties && typeof r.properties === 'object');
+  const incomplete = full.length < pages.length || page.request_status?.type === 'incomplete';
+  const rows = full
     .filter((r) => !r.archived && !r.in_trash)
     .map((r) => mapPage(key, r))
     .filter((r): r is RowOp => r !== null);
   const ops: Op[] = rows.map((r) => ({ opId: '', ...r }));
   if (ops.length) await withTransaction(true, (client) => applyOps(client, ops));
-  return { next: page.has_more ? page.next_cursor : null, count: rows.length, ids: rows.map((r) => r.id) };
+  return {
+    next: page.has_more ? page.next_cursor : null,
+    count: rows.length,
+    ids: rows.map((r) => r.id),
+    incomplete,
+  };
 }
 
 const idList = (v: unknown): string[] =>

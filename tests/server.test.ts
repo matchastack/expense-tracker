@@ -10,7 +10,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Op } from '@/lib/schema';
-import { notionDatabase, notionPage, prop } from './notion-fixtures';
+import { notionDataSource, notionPage, prop } from './notion-fixtures';
 
 const url = process.env.TEST_DATABASE_URL;
 const suite = url ? describe : describe.skip;
@@ -161,11 +161,21 @@ suite('sync', () => {
 /* ---------- A stand-in for the Notion API ---------- */
 
 interface FakeNotion {
-  databases: Array<ReturnType<typeof notionDatabase>>;
+  databases: Array<Record<string, unknown> & { id: string }>;
   pages: Record<string, Array<ReturnType<typeof notionPage>>>;
   requests: string[];
   /** How the fake reacts to ?filter_properties=…: honour it, reject it, or return rows stripped of everything. */
   filterMode: 'honour' | 'reject' | 'strip';
+  /** Simulate Notion being unable to return a full listing. */
+  listing: 'full' | 'limit-reached' | 'bare-pages';
+}
+
+interface Listing {
+  object: string;
+  results: Array<Record<string, unknown>>;
+  has_more: boolean;
+  next_cursor: string | null;
+  request_status?: { type: string; incomplete_reason?: string };
 }
 
 function startFakeNotion(state: FakeNotion): Promise<http.Server> {
@@ -181,7 +191,7 @@ function startFakeNotion(state: FakeNotion): Promise<http.Server> {
       if (req.headers.authorization !== 'Bearer secret_good_token_1234567890') {
         return send(401, { object: 'error', status: 401, code: 'unauthorized', message: 'API token is invalid.' });
       }
-      if (req.headers['notion-version'] !== '2022-06-28') return send(400, { message: 'missing version' });
+      if (req.headers['notion-version'] !== '2025-09-03') return send(400, { message: 'missing version' });
       const body = raw ? JSON.parse(raw) : {};
       const paginate = <T,>(all: T[], size: number) => {
         const start = body.start_cursor ? Number(body.start_cursor) : 0;
@@ -190,18 +200,31 @@ function startFakeNotion(state: FakeNotion): Promise<http.Server> {
         return { object: 'list', results, has_more: next !== null, next_cursor: next };
       };
       const url = new URL(req.url ?? '/', 'http://notion.test');
-      if (url.pathname === '/v1/search') return send(200, paginate(state.databases, 4));
-      const query = url.pathname.match(/^\/v1\/databases\/([^/]+)\/query$/);
+      if (url.pathname === '/v1/search') {
+        // The current API searches data sources; "database" is no longer a valid filter value.
+        if (body.filter?.value !== 'data_source') {
+          return send(400, { object: 'error', status: 400, code: 'validation_error', message: 'body.filter.value should be "page" or "data_source".' });
+        }
+        return send(200, paginate(state.databases, 4));
+      }
+      const query = url.pathname.match(/^\/v1\/data_sources\/([^/]+)\/query$/);
       if (query) {
         const pages = state.pages[query[1]];
         if (!pages) return send(404, { object: 'error', status: 404, message: 'Could not find database.' });
-        const list = paginate(pages, body.page_size ?? 100);
+        const list: Listing = paginate<Record<string, unknown>>(pages, body.page_size ?? 100);
+        if (state.listing === 'limit-reached') {
+          list.request_status = { type: 'incomplete', incomplete_reason: 'query_result_limit_reached' };
+        }
+        if (state.listing === 'bare-pages') {
+          list.results = list.results.map((p, i) => (i % 2 ? { object: 'page', id: p.id } : p));
+        }
         const wanted = url.searchParams.getAll('filter_properties'); // decoded once, like a real server
         if (wanted.length) {
           if (state.filterMode === 'reject') {
             return send(400, { object: 'error', status: 400, code: 'validation_error', message: 'filter_properties is invalid.' });
           }
           const schema = (state.databases.find((d) => d.id === query[1])?.properties ?? {}) as Record<string, { id: string }>;
+          const hasColumns = (p: Record<string, unknown>): p is { properties: Record<string, unknown> } => 'properties' in p;
           const keep = new Set(
             state.filterMode === 'strip'
               ? []
@@ -209,10 +232,11 @@ function startFakeNotion(state: FakeNotion): Promise<http.Server> {
                   .filter(([, p]) => wanted.includes(decodeURIComponent(p.id)))
                   .map(([name]) => name),
           );
-          list.results = list.results.map((p) => ({
-            ...p,
-            properties: Object.fromEntries(Object.entries(p.properties).filter(([name]) => keep.has(name))),
-          }));
+          list.results = list.results.map((p) =>
+            hasColumns(p)
+              ? { ...p, properties: Object.fromEntries(Object.entries(p.properties).filter(([name]) => keep.has(name))) }
+              : p,
+          );
         }
         return send(200, list);
       }
@@ -261,18 +285,23 @@ function buildWorkspace(): FakeNotion {
   return {
     requests: [],
     filterMode: 'honour',
+    listing: 'full',
     databases: [
-      notionDatabase(dbId(1), 'Asset Category'),
-      notionDatabase(dbId(2), 'Assets & Liabilities'),
-      notionDatabase(dbId(3), 'Payment Method'),
-      notionDatabase(dbId(4), 'Expense Category'),
-      notionDatabase(dbId(5), 'Income Category'),
-      notionDatabase(dbId(6), 'All Expense', expenseSchema),
-      notionDatabase(dbId(7), 'All Income'),
-      notionDatabase(dbId(8), 'Income Plan'),
-      notionDatabase(dbId(9), 'To Do Tracker'),
-      notionDatabase(dbId(10), 'Widget Library'),
-      { ...notionDatabase(dbId(11), 'All Expense'), in_trash: true },
+      notionDataSource(dbId(1), 'Asset Category'),
+      notionDataSource(dbId(2), 'Assets & Liabilities'),
+      notionDataSource(dbId(3), 'Payment Method'),
+      notionDataSource(dbId(4), 'Expense Category'),
+      notionDataSource(dbId(5), 'Income Category'),
+      notionDataSource(dbId(6), 'All Expense', expenseSchema),
+      notionDataSource(dbId(7), 'All Income'),
+      notionDataSource(dbId(8), 'Income Plan'),
+      notionDataSource(dbId(9), 'To Do Tracker'),
+      notionDataSource(dbId(10), 'Widget Library'),
+      { ...notionDataSource(dbId(11), 'All Expense'), in_trash: true },
+      // A database the integration can only partly see comes back without a title.
+      { object: 'data_source', id: dbId(13), properties: {} },
+      // The same data source listed twice must not count as a duplicate.
+      notionDataSource(dbId(4), 'Expense Category'),
     ],
     pages: {
       [dbId(1)]: [
@@ -339,7 +368,7 @@ async function runImport() {
   const found = await notionMod.discover(TOKEN);
   const seen: Record<string, string[]> = { expenses: [], incomes: [] };
   const counts: Record<string, number> = {};
-  for (const source of found.databases) {
+  for (const source of found.sources) {
     let cursor: string | null = null;
     do {
       const page = await notionMod.importPage(TOKEN, source.key, source.id, cursor, source.props);
@@ -369,7 +398,7 @@ suite('import from Notion', () => {
 
   it('finds the databases by title, ignoring trashed and unrelated ones', async () => {
     const found = await notionMod.discover(TOKEN);
-    expect(found.databases.map((d) => d.key)).toEqual([
+    expect(found.sources.map((d) => d.key)).toEqual([
       'assetCategories',
       'accounts',
       'paymentMethods',
@@ -380,7 +409,7 @@ suite('import from Notion', () => {
       'plan',
       'todos',
     ]);
-    const expenses = found.databases.find((d) => d.key === 'expenses');
+    const expenses = found.sources.find((d) => d.key === 'expenses');
     expect(expenses?.id).toBe(dbId(6));
     // Only the columns the import reads, never formulas or rollups.
     expect(expenses?.props).toEqual(['title', 'eUdJ%3Ap', 'a%40b', 'dFRT', 'ZERx', 'UXNV', 'shr1', 'spl1', 'spr1', 'dnt1']);
@@ -459,7 +488,7 @@ suite('import from Notion', () => {
       workspace.filterMode = mode;
       workspace.requests = [];
       const found = await notionMod.discover(TOKEN);
-      const source = found.databases.find((d) => d.key === 'expenses')!;
+      const source = found.sources.find((d) => d.key === 'expenses')!;
       const page = await notionMod.importPage(TOKEN, source.key, source.id, null, source.props);
       expect(page.count).toBe(100);
       expect(workspace.requests.filter((r) => r.includes(dbId(6)))).toHaveLength(2); // filtered, then unfiltered
@@ -468,6 +497,26 @@ suite('import from Notion', () => {
     const { rows } = await syncMod.sync(0, []);
     // Rows were not blanked by the stripped response.
     expect(rows.expenses?.find((e) => e.id === 'exp-1')).toMatchObject({ name: 'train', amount: 3, categoryId: 'cat-food' });
+  });
+
+  it('flags a partial listing instead of treating missing rows as deleted', async () => {
+    const found = await notionMod.discover(TOKEN);
+    const source = found.sources.find((d) => d.key === 'expenses')!;
+
+    workspace.listing = 'limit-reached';
+    const limited = await notionMod.importPage(TOKEN, source.key, source.id, null, source.props);
+    expect(limited).toMatchObject({ count: 100, incomplete: true });
+
+    // Bare { id } pages (no content access) are skipped, never imported as blank rows.
+    workspace.listing = 'bare-pages';
+    const bare = await notionMod.importPage(TOKEN, source.key, source.id, null, source.props);
+    expect(bare).toMatchObject({ count: 50, incomplete: true });
+    workspace.listing = 'full';
+
+    const full = await notionMod.importPage(TOKEN, source.key, source.id, null, source.props);
+    expect(full).toMatchObject({ count: 100, incomplete: false });
+    const { rows } = await syncMod.sync(0, []);
+    expect(rows.expenses?.find((e) => e.id === 'exp-1')).toMatchObject({ name: 'train', amount: 3 });
   });
 
   it('never wipes transactions when a listing comes back empty', async () => {
@@ -482,7 +531,7 @@ suite('import from Notion', () => {
     workspace.databases = saved.filter((d) => d.id !== dbId(7) && d.id !== dbId(3));
     await expect(notionMod.discover(TOKEN)).rejects.toThrow('Could not find: Payment Method, All Income');
 
-    workspace.databases = [...saved, notionDatabase(dbId(12), 'All Income')];
+    workspace.databases = [...saved, notionDataSource(dbId(12), 'All Income')];
     await expect(notionMod.discover(TOKEN)).rejects.toThrow('Found 2 databases named "All Income"');
     workspace.databases = saved;
 

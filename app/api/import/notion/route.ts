@@ -20,6 +20,6 @@ export const POST = route(async (req) => {
     throw new HttpError(400, 'Paste your Notion integration secret.');
   }
   if (body.step === 'discover') return json(await discover(token));
-  if (body.step === 'page') return json(await importPage(token, body.key, body.databaseId, body.cursor, body.props));
+  if (body.step === 'page') return json(await importPage(token, body.key, body.sourceId, body.cursor, body.props));
   throw new HttpError(400, 'Unknown step.');
 });

@@ -1,4 +1,4 @@
-/** Builders for objects shaped like Notion's REST API (version 2022-06-28). */
+/** Builders for objects shaped like Notion's REST API (version 2025-09-03, where databases expose data sources). */
 
 const rich = (text: string) => (text ? [{ type: 'text', plain_text: text, text: { content: text } }] : []);
 
@@ -25,6 +25,14 @@ export function notionPage(id: string, properties: Record<string, unknown>, crea
   };
 }
 
-export function notionDatabase(id: string, title: string, properties: Record<string, unknown> = {}) {
-  return { object: 'database', id, title: rich(title), archived: false, in_trash: false, properties };
+export function notionDataSource(id: string, title: string, properties: Record<string, unknown> = {}) {
+  return {
+    object: 'data_source',
+    id,
+    title: rich(title),
+    parent: { type: 'database_id', database_id: `db-of-${id}` },
+    archived: false,
+    in_trash: false,
+    properties,
+  };
 }
