@@ -1,0 +1,21 @@
+# venv
+bin/
+include/
+lib/
+pyvenv.cfg
+
+# jupyter
+share/
+etc/
+
+# cache
+__pycache__/
+
+# vscode
+.vscode/
+
+# streamlit
+.streamlit/
+
+# secrets
+.env
